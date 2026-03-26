@@ -1,6 +1,7 @@
 import io
 import uuid
 from contextlib import redirect_stdout
+from datetime import timedelta
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -15,7 +16,7 @@ from openwisp_utils.tests import capture_any_output
 from .. import settings as app_settings
 from ..hardware import FIRMWARE_IMAGE_MAP, REVERSE_FIRMWARE_IMAGE_MAP
 from ..swapper import load_model
-from ..tasks import upgrade_firmware
+from ..tasks import check_pending_upgrades, retry_pending_upgrade, upgrade_firmware
 from .base import TestUpgraderMixin
 
 Group = swapper.load_model("openwisp_users", "Group")
@@ -632,6 +633,77 @@ class TestModelsTransaction(TestUpgraderMixin, TransactionTestCase):
         batch = BatchUpgradeOperation.objects.first()
         self.assertEqual(batch.status, "failed")
         self.assertEqual(BatchUpgradeOperation.objects.count(), 1)
+
+    @mock.patch.object(upgrade_firmware, "max_retries", 0)
+    def test_persistent_upgrade_goes_pending_on_offline_device(self):
+        """
+        When persistent=True and the device is unreachable after all Celery
+        retries, the UpgradeOperation should transition to 'pending' instead
+        of 'failed', and retry_count / next_retry_at should be set.
+        """
+        env = self._create_upgrade_env()
+        with redirect_stdout(io.StringIO()):
+            env["build2"].batch_upgrade(firmwareless=False)
+        # Mark all operations as persistent (simulating persistent=True batch)
+        UpgradeOperation.objects.all().update(
+            persistent=True, status="in-progress", retry_count=0
+        )
+        # Re-run upgrade on each operation so _recoverable_failure_handler fires
+        for op in UpgradeOperation.objects.all():
+            with redirect_stdout(io.StringIO()):
+                op.upgrade(recoverable=False)
+            op.refresh_from_db()
+            self.assertEqual(op.status, "pending")
+            self.assertEqual(op.retry_count, 1)
+            self.assertIsNotNone(op.next_retry_at)
+
+    @mock.patch.object(upgrade_firmware, "max_retries", 0)
+    @mock.patch("openwisp_firmware_upgrader.tasks.retry_pending_upgrade.apply_async")
+    def test_check_pending_upgrades_dispatches_due_operations(self, mock_apply_async):
+        """
+        check_pending_upgrades() should dispatch retry_pending_upgrade for
+        every pending operation whose next_retry_at is in the past.
+        """
+        env = self._create_upgrade_env()
+        with redirect_stdout(io.StringIO()):
+            env["build2"].batch_upgrade(firmwareless=False)
+        # Force operations into pending state with an overdue next_retry_at
+        past = timezone.now() - timedelta(minutes=5)
+        UpgradeOperation.objects.all().update(
+            persistent=True,
+            status="pending",
+            retry_count=1,
+            next_retry_at=past,
+        )
+        pending_pks = list(UpgradeOperation.objects.values_list("pk", flat=True))
+        check_pending_upgrades()
+        self.assertEqual(mock_apply_async.call_count, len(pending_pks))
+        dispatched_ids = [
+            call.kwargs["args"][0] for call in mock_apply_async.call_args_list
+        ]
+        self.assertCountEqual(dispatched_ids, pending_pks)
+
+    @mock.patch.object(upgrade_firmware, "max_retries", 0)
+    @mock.patch("openwisp_firmware_upgrader.tasks.upgrade_firmware.delay")
+    def test_retry_pending_upgrade_idempotent(self, mock_delay):
+        """
+        Calling retry_pending_upgrade twice for the same operation should
+        only dispatch upgrade_firmware once (atomic compare-and-swap).
+        """
+        env = self._create_upgrade_env()
+        with redirect_stdout(io.StringIO()):
+            env["build2"].batch_upgrade(firmwareless=False)
+        op = UpgradeOperation.objects.first()
+        op.persistent = True
+        op.status = "pending"
+        op.retry_count = 1
+        op.save()
+        mock_delay.reset_mock()  # ignore calls from batch_upgrade setup above
+        retry_pending_upgrade(op.pk)
+        retry_pending_upgrade(op.pk)  # second call — op is now in-progress, not pending
+        self.assertEqual(mock_delay.call_count, 1)
+        op.refresh_from_db()
+        self.assertEqual(op.status, "in-progress")
 
     @mock.patch(_mock_updrade, return_value=True)
     @mock.patch(_mock_connect, return_value=True)

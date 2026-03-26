@@ -1,9 +1,11 @@
 import logging
+import random
 
 import swapper
 from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 from django.core.exceptions import ObjectDoesNotExist
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from openwisp_utils.tasks import OpenwispCeleryTask
@@ -83,6 +85,42 @@ def create_all_device_firmwares(self, firmware_image_id):
     queryset = Device.objects.filter(os=fw_image.build.os)
     for device in queryset.iterator():
         DeviceFirmware.create_for_device(device, fw_image)
+
+
+@shared_task(base=OpenwispCeleryTask)
+def retry_pending_upgrade(operation_id):
+    """
+    Retry a single pending upgrade operation.
+    Uses atomic filter().update() so concurrent calls are idempotent.
+    """
+    UpgradeOperation = load_model("UpgradeOperation")
+    updated = UpgradeOperation.objects.filter(
+        pk=operation_id, status="pending"
+    ).update(status="in-progress")
+    if not updated:
+        return  # already claimed or deleted
+    try:
+        op = UpgradeOperation.objects.get(pk=operation_id)
+    except ObjectDoesNotExist:
+        return
+    op.log_line(f"Retrying upgrade (persistent attempt #{op.retry_count}).")
+    upgrade_firmware.delay(op.pk)
+
+
+@shared_task(base=OpenwispCeleryTask)
+def check_pending_upgrades():
+    """
+    Celery Beat task: runs every 10 minutes.
+    Finds pending operations whose next_retry_at has passed and dispatches retries.
+    """
+    UpgradeOperation = load_model("UpgradeOperation")
+    due_ops = UpgradeOperation.objects.filter(
+        status="pending",
+        next_retry_at__lte=timezone.now(),
+    ).values_list("pk", flat=True)
+    for op_pk in due_ops:
+        countdown = random.randint(0, 300)
+        retry_pending_upgrade.apply_async(args=[op_pk], countdown=countdown)
 
 
 @shared_task(base=OpenwispCeleryTask)

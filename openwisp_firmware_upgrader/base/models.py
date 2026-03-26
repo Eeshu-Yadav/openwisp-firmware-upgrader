@@ -1,4 +1,6 @@
 import logging
+import random
+from datetime import timedelta
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
@@ -793,13 +795,14 @@ class AbstractBatchUpgradeOperation(UpgradeOptionsMixin, TimeStampedEditableMode
 
 class AbstractUpgradeOperation(UpgradeOptionsMixin, TimeStampedEditableModel):
 
-    _CANCELLABLE_STATUS = "in-progress"
+    _CANCELLABLE_STATUS = ("in-progress", "pending")
     STATUS_CHOICES = (
         ("in-progress", _("in progress")),
         ("success", _("success")),
         ("failed", _("failed")),  # failed at late stage or can't reconnect
         ("cancelled", _("cancelled")),  # cancelled by the user
         ("aborted", _("aborted")),  # aborted due to prerequisites not met
+        ("pending", _("pending")),  # device offline, waiting for retry
     )
     device = models.ForeignKey(
         swapper.get_model_name("config", "Device"), on_delete=models.CASCADE
@@ -822,6 +825,23 @@ class AbstractUpgradeOperation(UpgradeOptionsMixin, TimeStampedEditableModel):
         on_delete=models.CASCADE,
         blank=True,
         null=True,
+    )
+    persistent = models.BooleanField(
+        default=False,
+        help_text=_(
+            "When enabled, the operation will remain pending and "
+            "automatically retry when the device comes back online."
+        ),
+    )
+    retry_count = models.PositiveIntegerField(
+        default=0,
+        help_text=_("Number of persistent retry attempts after initial failure."),
+    )
+    next_retry_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=_("When the next periodic retry should be attempted."),
     )
 
     def __str__(self):
@@ -893,12 +913,44 @@ class AbstractUpgradeOperation(UpgradeOptionsMixin, TimeStampedEditableModel):
             self.refresh_from_db()
             self.log_line(_("Upgrade operation has been cancelled by user"))
 
+    def _calculate_next_retry(self):
+        from django.conf import settings
+
+        base = getattr(
+            settings,
+            "OPENWISP_FIRMWARE_UPGRADER_PERSISTENT_RETRY_BASE_DELAY",
+            600,  # 10 minutes
+        )
+        max_delay = getattr(
+            settings,
+            "OPENWISP_FIRMWARE_UPGRADER_PERSISTENT_RETRY_MAX_DELAY",
+            43200,  # 12 hours
+        )
+        delay = min(base * (2 ** (self.retry_count - 1)), max_delay)
+        jitter = delay * 0.25
+        delay += random.uniform(-jitter, jitter)
+        return timezone.now() + timedelta(seconds=max(delay, base))
+
     def _recoverable_failure_handler(self, recoverable, error):
         cause = str(error)
         if recoverable:
             self.log_line(f"Detected a recoverable failure: {cause}.\n", save=False)
             self.log_line("The upgrade operation will be retried soon.")
             raise error
+        if self.persistent:
+            self.status = "pending"
+            self.retry_count += 1
+            self.next_retry_at = self._calculate_next_retry()
+            self.log_line(
+                f"Max retries exceeded. Device appears offline: {cause}.\n",
+                save=False,
+            )
+            self.log_line(
+                f"Persistent mode enabled, will retry automatically "
+                f"(attempt #{self.retry_count}, next retry at {self.next_retry_at}).",
+                save=False,
+            )
+            return
         self.status = "failed"
         self.log_line(f"Max retries exceeded. Upgrade failed: {cause}.", save=False)
 
