@@ -117,6 +117,19 @@ class BatchUpgradeConfirmationForm(forms.ModelForm):
         help_text=_("Limit the upgrade to devices at this location"),
         widget=MassUpgradeSelect2Widget(placeholder=_("Select a location")),
     )
+    persistent = forms.BooleanField(
+        initial=True,
+        required=False,
+        help_text=_(
+            "Keep retrying offline devices automatically until they come "
+            "online and are upgraded, or the operation is cancelled."
+        ),
+    )
+    scheduled_at = forms.DateTimeField(
+        required=False,
+        widget=forms.DateTimeInput(attrs={"type": "datetime-local"}),
+        help_text=_("Leave empty to execute immediately."),
+    )
 
     class Meta:
         model = BatchUpgradeOperation

@@ -654,7 +654,9 @@ class AbstractBatchUpgradeOperation(UpgradeOptionsMixin, TimeStampedEditableMode
 
     @property
     def progress_report(self):
-        completed = self.upgrade_operations.exclude(status="in-progress").count()
+        completed = self.upgrade_operations.exclude(
+            status__in=("in-progress", "pending")
+        ).count()
         return _(f"{completed} out of {self.total_operations}")
 
     @property
@@ -740,9 +742,18 @@ class AbstractBatchUpgradeOperation(UpgradeOptionsMixin, TimeStampedEditableMode
                     output_field=models.IntegerField(),
                 )
             ),
+            pending=models.Count(
+                models.Case(
+                    models.When(status="pending", then=1),
+                    output_field=models.IntegerField(),
+                )
+            ),
             completed=models.Count(
                 models.Case(
-                    models.When(~models.Q(status="in-progress"), then=1),
+                    models.When(
+                        ~models.Q(status__in=("in-progress", "pending")),
+                        then=1,
+                    ),
                     output_field=models.IntegerField(),
                 )
             ),
@@ -772,7 +783,7 @@ class AbstractBatchUpgradeOperation(UpgradeOptionsMixin, TimeStampedEditableMode
             ),
         )
         # Determine overall batch status based on individual operation statuses
-        if stats["in_progress"] > 0:
+        if stats["in_progress"] > 0 or stats["pending"] > 0:
             new_status = "in-progress"
         elif stats["failed"] > 0 or stats["aborted"] > 0:
             new_status = "failed"

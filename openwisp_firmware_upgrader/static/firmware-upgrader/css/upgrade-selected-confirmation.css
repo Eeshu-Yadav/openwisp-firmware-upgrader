@@ -19,3 +19,45 @@ input.special {
 .select2-input + .select2 .select2-selection {
   min-width: auto !important;
 }
+/* Persistence & Scheduling fields */
+fieldset.module.aligned .form-row {
+  padding: 10px 12px !important;
+  display: block !important;
+  visibility: visible !important;
+  overflow: visible !important;
+  min-height: 40px;
+  border-bottom: 1px solid #eee;
+}
+fieldset.module.aligned .form-row .flex-container {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  visibility: visible !important;
+}
+fieldset.module.aligned .form-row label {
+  min-width: 120px;
+  font-weight: 600;
+  color: #333 !important;
+}
+fieldset.module.aligned .form-row .help {
+  color: #666 !important;
+  visibility: visible !important;
+}
+.tz-badge {
+  display: inline-block;
+  background: #f0f0f0;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+  margin-left: 8px;
+}
+input[type="datetime-local"] {
+  padding: 6px 10px;
+}
+input[type="checkbox"]#id_persistent {
+  width: 18px;
+  height: 18px;
+}

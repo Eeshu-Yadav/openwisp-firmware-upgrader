@@ -197,6 +197,22 @@
   color: #6c757d;
 }
 
+.upgrade-status-pending {
+  color: #f0ad4e;
+}
+
+.upgrade-status-scheduled {
+  color: #5bc0de;
+}
+
+.upgrade-status-container .upgrade-progress-fill.pending {
+  background-color: #f0ad4e;
+}
+
+.batch-main-progress .upgrade-progress-fill.scheduled {
+  background-color: #5bc0de;
+}
+
 .batch-main-progress {
   display: flex;
   align-items: center;
